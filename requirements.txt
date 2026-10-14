@@ -1,0 +1,6 @@
+nflreadpy
+pandas
+scikit-learn
+joblib
+pyarrow
+pytest
