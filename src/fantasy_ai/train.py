@@ -52,6 +52,10 @@ def find_latest_raw_file() -> Path:
 def build_modeling_frame(stats: pd.DataFrame) -> pd.DataFrame:
     """Create lagged features; all rolling inputs are based on prior appearances."""
     frame = stats.copy()
+    if "season_type" in frame.columns:
+        frame = frame[
+            frame["season_type"] == "REG"
+        ].copy()
     required = ["season", "week", "player_id"]
     missing = [col for col in required if col not in frame.columns]
     if missing:
@@ -262,6 +266,33 @@ def main() -> None:
         - test_results["prior_ppr_mean"]
     ).abs()
 
+    season_results = test[
+        ["season", "position", "actual_ppr"]
+    ].copy()
+
+    season_results["prediction"] = predictions
+
+    season_results["absolute_error"] = (
+        season_results["actual_ppr"]
+        - season_results["prediction"]
+    ).abs()
+
+    print("\nModel MAE by season:")
+    print(
+        season_results.groupby("season")["absolute_error"]
+        .agg(["mean", "count"])
+        .round(3)
+    )
+
+    print("\nModel MAE by season and position:")
+    print(
+        season_results.groupby(
+            ["season", "position"]
+        )["absolute_error"]
+        .agg(["mean", "count"])
+        .round(3)
+    )
+
     print("\nActual PPR distribution:")
     print(
         test["actual_ppr"].describe(
@@ -307,7 +338,7 @@ def main() -> None:
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": model, "features": features}, MODEL_DIR / "ppr_hist_gradient_boosting_matchups.joblib")
+    joblib.dump({"model": model, "features": features}, MODEL_DIR / "ppr_hist_gradient_boosting_matchups_season_reset.joblib")
 
     output = test[["season", "week", "player_id", "player_name", "position", "actual_ppr"]].copy()
     output["predicted_ppr"] = predictions.round(2)
@@ -320,7 +351,7 @@ def main() -> None:
         f"Train rows: {len(train):,}\nTest rows: {len(test):,}\n"
         f"Model MAE: {mae:.3f}\nModel RMSE: {rmse:.3f}\n"
         f"Prior-average baseline MAE: {baseline_mae:.3f}\n"
-        f"Saved model: {MODEL_DIR / 'ppr_hist_gradient_boosting_matchups.joblib'}\n"
+        f"Saved model: {MODEL_DIR / 'ppr_hist_gradient_boosting_matchups_season_reset.joblib'}\n"
         f"Saved predictions: {REPORT_DIR / 'holdout_predictions.csv'}\n"
     )
     (REPORT_DIR / "evaluation.txt").write_text(summary, encoding="utf-8")

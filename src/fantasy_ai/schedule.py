@@ -85,11 +85,13 @@ def load_player_teams(season: int, week: int) -> pd.DataFrame:
         .drop_duplicates("gsis_id", keep="last")
     )
 
-    result = rosters[["gsis_id", "team", "week"]].rename(
-        columns={
-            "gsis_id": "player_id",
-            "week": "roster_week",
-        }
-    )
+    if "status" not in rosters.columns:
+        rosters["status"] = pd.NA
 
-    return result
+    return rosters[
+        ["gsis_id", "team", "week", "status"]
+    ].rename(columns={
+        "gsis_id": "player_id",
+        "week": "roster_week",
+        "status": "roster_status",
+    })

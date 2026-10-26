@@ -29,10 +29,18 @@ from src.fantasy_ai.matchups import (
     add_matchup_features,
 )
 
+from src.fantasy_ai.opportunity import (
+    OPPORTUNITY_FEATURES,
+    add_opportunity_features,
+    load_snap_history,
+)
+
+from src.fantasy_ai.availability import apply_availability
+
 MODEL_PATH = (
     ROOT
     / "models"
-    / "ppr_hist_gradient_boosting_matchups.joblib"
+    / "ppr_hist_gradient_boosting_opportunities_production.joblib"
 )
 REPORT_DIR = ROOT / "reports"
 FANTASY_POSITIONS = ["QB", "RB", "WR", "TE"]
@@ -159,78 +167,48 @@ def predict_week(season: int, week: int, top: int) -> pd.DataFrame:
     if prediction_rows.empty:
         raise ValueError("No eligible player rows were generated.")
 
-    if any(col in features for col in DEFENSE_FEATURES):
+    needs_defense = any(f in features for f in DEFENSE_FEATURES)
+    needs_opportunity = any(f in features for f in OPPORTUNITY_FEATURES)
 
+    if needs_defense or needs_opportunity:
         player_teams = load_player_teams(season, week)
         matchups = load_week_matchups(season, week)
+        player_teams["player_id"] = player_teams["player_id"].astype(str)
+        prediction_rows["player_id"] = prediction_rows["player_id"].astype(str)
 
-        player_teams["player_id"] = (
-            player_teams["player_id"].astype(str)
-        )
-
-        prediction_rows["player_id"] = (
-            prediction_rows["player_id"].astype(str)
-        )
-
-        # Determine current opponents from current rosters
-        # and the requested week's schedule.
         opponent_lookup = player_teams.merge(
             matchups[["team", "opponent"]],
-            on="team",
-            how="inner",
-            validate="many_to_one",
+            on="team", how="inner", validate="many_to_one",
         )
-
-        # Remove the historical opponent copied into the
-        # future placeholder row. It is NOT this week's opponent.
         prediction_rows = prediction_rows.drop(
-            columns=["opponent_team"],
+            columns=["team", "recent_team", "opponent_team"],
             errors="ignore",
         )
-
-        # Only predict players with a verified team
-        # and a scheduled game this week.
-        candidates_before = len(prediction_rows)
-
+        before = len(prediction_rows)
         prediction_rows = prediction_rows.merge(
-            opponent_lookup[
-                ["player_id", "opponent"]
-            ].rename(columns={
-                "opponent": "opponent_team"
-            }),
-            on="player_id",
-            how="inner",
-            validate="many_to_one",
+            opponent_lookup[["player_id", "team", "opponent"]].rename(
+                columns={"opponent": "opponent_team"}
+            ),
+            on="player_id", how="inner", validate="many_to_one",
         )
-
-        excluded_before_prediction = (
-            candidates_before - len(prediction_rows)
-        )
-
-        print(
-            "Players excluded before prediction "
-            f"(bye, no scheduled game, or no roster match): "
-            f"{excluded_before_prediction}"
-        )
-
+        print("Players excluded before prediction:", before - len(prediction_rows))
         if prediction_rows.empty:
-            raise ValueError(
-                "No eligible players with scheduled games."
+            raise ValueError("No scheduled players with a verified roster team.")
+
+        if needs_defense:
+            prediction_rows = add_matchup_features(history, prediction_rows)
+        if needs_opportunity:
+            start = int(pd.to_numeric(stats["season"], errors="coerce").min())
+            end = int(pd.to_numeric(stats["season"], errors="coerce").max())
+            snaps = load_snap_history(start, end, ROOT / "data" / "raw")
+            prediction_rows = add_opportunity_features(
+                history, prediction_rows, snaps=snaps,
             )
-
-        # Add defensive features only for eligible players.
-        prediction_rows = add_matchup_features(
-            history,
-            prediction_rows,
-        )
-
-        print("\nOpponent feature coverage:")
-        print(
-            prediction_rows[DEFENSE_FEATURES]
-            .notna()
-            .mean()
-            .round(3)
-        )
+            print("Opportunity feature coverage:")
+            print(
+                prediction_rows[OPPORTUNITY_FEATURES]
+                .notna().mean().round(3).to_string()
+            )
 
 
     missing_features = [
@@ -355,34 +333,51 @@ def predict_week(season: int, week: int, top: int) -> pd.DataFrame:
             "All injury statuses are unknown."
         )
 
-    # Preserve every projection in the complete results.
-    # Exclude explicitly ruled-out players from actionable rankings.
-    # Preserve every projection before injury-based exclusions.
-    full_results = result.copy()
-
-    full_results["projection_status"] = np.where(
-        full_results["injury_status"] == "Out",
-        "Excluded - Out",
-        "Eligible - Not confirmed active"
+    result = apply_availability(
+        result,
+        season,
+        week,
+        overrides_path=(
+            ROOT / "data" / "manual" / "availability_overrides.csv"
+        ),
     )
+
+    print("\nAvailability summary:")
+    print(result["availability_status"].value_counts())
+
+    print(
+        "Players excluded due to unavailability:",
+        int(result["exclude_from_rankings"].sum())
+    )
+
+    # Keep excluded players and their reasons in the audit.
+    full_results = result.copy()
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    audit_path = (
-        REPORT_DIR
-        / f"projections_audit_{season}_week_{week}.csv"
+    full_results.to_csv(
+        REPORT_DIR / f"projections_audit_{season}_week_{week}.csv",
+        index=False,
     )
 
-    full_results.to_csv(audit_path, index=False)
+    excluded = result.loc[
+        result["exclude_from_rankings"],
+        [
+            "player_name",
+            "team",
+            "roster_status",
+            "roster_week",
+            "injury_status",
+            "availability_reason",
+        ],
+    ]
 
-    print(f"Saved full projection audit: {audit_path}")
+    print("\nExcluded player audit:")
+    print(excluded.to_string(index=False))
 
-    # Only explicitly ruled-out players are removed.
-    result = full_results[
-        full_results["injury_status"] != "Out"
+    result = result[
+        ~result["exclude_from_rankings"]
     ].copy()
-
-    result = result.drop(columns=["projection_status"])
 
     print(
         f"Players excluded due to Out designation: "
@@ -430,6 +425,7 @@ def predict_week(season: int, week: int, top: int) -> pd.DataFrame:
                 "player_name",
                 "team",
                 "opponent",
+                "availability_status",
                 "injury_status",
                 "practice_status",
                 #"injury_description",

@@ -77,8 +77,8 @@ def add_matchup_features(history: pd.DataFrame, targets: pd.DataFrame) -> pd.Dat
     )
 
     groups = game_position.groupby(
-    ["season", "opponent_team", "position"],
-    sort=False,
+        ["season", "opponent_team", "position"],
+        sort=False,
     )
     
     for n in (3, 5):
@@ -98,12 +98,17 @@ def add_matchup_features(history: pd.DataFrame, targets: pd.DataFrame) -> pd.Dat
 
     # pd.merge_asof requires sorting by the merge key, globally.
     lookup = lookup.sort_values('game_key', kind='stable')
-    right = game_position[['game_key', 'opponent_team', 'position', *DEFENSE_FEATURES]]
+    right = game_position[
+        ['game_key', 'season', 'opponent_team', 'position', *DEFENSE_FEATURES]
+    ]
     right = right.sort_values('game_key', kind='stable')
     joined = pd.merge_asof(
-        lookup, right,
-        on='game_key', by=['opponent_team', 'position'],
-        direction='backward', allow_exact_matches=False,
+        lookup,
+        right,
+        on='game_key',
+        by=['season', 'opponent_team', 'position'],
+        direction='backward',
+        allow_exact_matches=False,
     ).sort_values('_row')
 
     output = targets.copy()
